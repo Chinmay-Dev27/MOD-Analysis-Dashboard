@@ -3,13 +3,12 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import pdfplumber
-import io
 import re
 
 # --- 1. PAGE SETUP ---
 st.set_page_config(page_title="MOD Strategic Intelligence", layout="wide", initial_sidebar_state="expanded")
 
-# --- 2. DATA PARSING ---
+# --- 2. ROBUST DATA PARSING (ANCHOR PIVOT METHOD) ---
 def parse_pdf_text(file_obj):
     text = ""
     with pdfplumber.open(file_obj) as pdf:
@@ -18,23 +17,48 @@ def parse_pdf_text(file_obj):
             if extracted: text += extracted + "\n"
             
     data = []
-    pattern = re.compile(r'(.*?)\s+([\d\.\/]+|-|xxx)?\s*(Coal|Gas|Coal/Oil/Gas)\s+([\d\.\-]+)\s+([\d\.\-]+)?\s*([\d\.\-]+)$', re.IGNORECASE)
     
     for line in text.split('\n'):
         line = line.strip()
         if not line: continue
-        match = pattern.search(line)
+        
+        # Use the Fuel Type as the center anchor to split the row
+        match = re.search(r'\s+(Coal/Oil/Gas|Coal|Gas)\s+', line, re.IGNORECASE)
+        
         if match:
-            station = re.sub(r'^\d+\s+', '', match.group(1).strip())
-            capacity = match.group(2) if match.group(2) else "0"
-            try:
-                data.append({
-                    'Generating_Station': station, 
-                    'Capacity_MW': capacity, 
-                    'Total_VC': float(match.group(6))
-                })
-            except ValueError:
-                continue
+            # Split into left side (Station, Capacity) and right side (VCs)
+            left_part = line[:match.start()].strip()
+            right_part = line[match.end():].strip()
+            
+            left_tokens = left_part.split()
+            right_tokens = right_part.split()
+            
+            if len(left_tokens) >= 2 and len(right_tokens) >= 1:
+                # Capacity is always the last item before the fuel
+                capacity = left_tokens[-1]
+                
+                # Station is everything between the Sr No and the Capacity
+                station = " ".join(left_tokens[1:-1])
+                
+                # Total VC is always the last item on the right side
+                total_vc_str = right_tokens[-1]
+                
+                # Clean up the numbers
+                try:
+                    # Strip any accidental commas or trailing text characters
+                    vc_clean = re.search(r'([\d\.]+)', total_vc_str)
+                    if vc_clean:
+                        total_vc = float(vc_clean.group(1))
+                        # Ignore 0 values as they represent faulty blank lines
+                        if total_vc > 0:
+                            data.append({
+                                'Generating_Station': station, 
+                                'Capacity_MW': capacity, 
+                                'Total_VC': total_vc
+                            })
+                except ValueError:
+                    continue
+                    
     return pd.DataFrame(data)
 
 def process_dataframe(df):
@@ -89,6 +113,11 @@ if uploaded_file is not None:
         raw_df.columns = ['Sr_No', 'Generating_Station', 'Owner_Type', 'Capacity_MW', 'Fuel_Type', 'Approved_VC', 'Impact_Change', 'Total_VC']
         raw_df = raw_df.dropna(subset=['Total_VC'])
         df = process_dataframe(raw_df)
+        
+    # Raw Data Preview Tool
+    if not df.empty:
+        with st.expander("🔍 View Raw Extraction Data"):
+            st.dataframe(df[['MOD_Rank', 'Generating_Station', 'Capacity_MW', 'Total_VC']], hide_index=True)
 
 # --- 4. MAIN DASHBOARD ---
 st.title("⚡ MOD Grid Strategy & Risk Dashboard")
