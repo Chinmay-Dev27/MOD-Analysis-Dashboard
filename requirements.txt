@@ -4,3 +4,4 @@ plotly
 requests
 beautifulsoup4
 pdfplumber
+openpyxl
