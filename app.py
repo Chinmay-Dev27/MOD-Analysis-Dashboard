@@ -10,7 +10,6 @@ import re
 st.set_page_config(page_title="Mahagenco Grid & MOD Monitor", layout="wide")
 st.title("⚡ Grid Demand & MOD RSD Risk Dashboard")
 
-# Global Headers to bypass WAF / Bot Protection
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -18,48 +17,64 @@ HEADERS = {
 }
 
 # --- 2. SCRAPE LIVE STATE DEMAND ---
-@st.cache_data(ttl=300) # Cache for 5 minutes
+@st.cache_data(ttl=300)
 def get_live_demand():
     try:
         url = "https://mahasldc.in/"
-        # Added headers to prevent 403 Forbidden errors
         response = requests.get(url, headers=HEADERS, verify=False, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Scrape the homepage text to find the "MW State Demand" line
         text = soup.get_text()
         match = re.search(r'(\d+)\s*MW State Demand', text, re.IGNORECASE)
         if match:
             return int(match.group(1))
         return None
-    except Exception as e:
-        st.error(f"Failed to fetch live demand from MSLDC: {e}")
+    except Exception:
+        # Silently fail here to avoid cluttering the UI; the warning block below handles the alert.
         return None
 
-# --- 3. DATA PROCESSING LOGIC ---
+# --- 3. DATA PROCESSING LOGIC (FIXED FOR DIRTY EXCEL DATA) ---
 def process_mod_data(df):
     """Cleans the raw MOD data and calculates cumulative capacity."""
-    # Ensure column headers match expected format
     df.columns = [
         'Sr_No', 'Generating_Station', 'Owner_Type', 
         'Capacity_MW', 'Fuel_Type', 'Approved_VC', 
         'Impact_Change', 'Total_VC'
     ]
     
-    # Drop rows without a valid Total VC (removes section headers)
+    # Drop rows without a valid Total VC
     df = df.dropna(subset=['Total_VC'])
-    df = df[df['Total_VC'].apply(lambda x: str(x).replace('.','',1).isdigit())]
-    df['Total_VC'] = df['Total_VC'].astype(float)
+    
+    def safe_float(val):
+        try:
+            clean_str = str(val).replace(',', '').strip()
+            match = re.search(r'[\d\.]+', clean_str)
+            return float(match.group()) if match else None
+        except:
+            return None
+            
+    df['Total_VC'] = df['Total_VC'].apply(safe_float)
+    df = df.dropna(subset=['Total_VC'])
 
-    # Handle the "Installed/Share" formatting in the MW column
+    # FIXED: Handle "Installed/Share", commas, and stray text
     def extract_share(mw_string):
-        if pd.isna(mw_string) or str(mw_string).strip() in ['-', 'XXX', '']:
+        if pd.isna(mw_string):
             return 0.0
         mw_str = str(mw_string).strip()
+        if mw_str in ['-', 'XXX', '']:
+            return 0.0
+        
         if '/' in mw_str:
-            return float(mw_str.split('/')[1])
+            target_str = mw_str.split('/')[1]
         else:
-            return float(mw_str)
+            target_str = mw_str
+            
+        # Strip commas out (e.g. 1,200 -> 1200) and regex search for decimals/digits
+        target_str = target_str.replace(',', '')
+        match = re.search(r'[\d\.]+', target_str)
+        if match:
+            return float(match.group())
+        return 0.0
 
     df['Capacity_MW'] = df['Capacity_MW'].apply(extract_share)
     
@@ -71,7 +86,6 @@ def process_mod_data(df):
 # --- 4. FALLBACK / DEFAULT DATA ---
 @st.cache_data
 def get_default_mod_data():
-    # This acts as the default dataset if the PDF scraper fails or no file is uploaded
     csv_data = """Sr_No,Generating_Station,Owner_Type,Capacity_MW,Fuel_Type,Approved_VC,Impact_Change,Total_VC
     1,SSTPS-I Sipat,CS,510,Coal,1.4179,,1.4179
     2,RattanIndia Power Ltd Amravati,IPP,1200,Coal,2.0138,0.3623,2.3761
@@ -95,7 +109,6 @@ col1, col2 = st.columns([1, 2])
 with col1:
     st.subheader("Grid Parameters")
     
-    # Optional file upload for robustness
     uploaded_file = st.file_uploader("Upload Monthly MOD Stack (Excel)", type=["xlsx"])
     pdf_link = st.text_input("Or verify PDF URL (Automated Scrape)", "https://mahasldc.in/assets/shared/reports/dr3_032026.pdf")
     
@@ -103,13 +116,11 @@ with col1:
     if live_demand:
         st.success(f"Live State Demand: **{live_demand} MW**")
     else:
-        st.warning("Could not fetch live demand. Using manual input.")
+        st.warning("Could not fetch live demand. Cloud IPs blocked by SLDC WAF. Using manual input.")
         
-    # Slider to simulate demand drops
     simulated_demand = st.slider("Simulate State Demand (MW)", min_value=1000, max_value=35000, value=live_demand if live_demand else 20000)
 
 with col2:
-    # Load Data
     if uploaded_file is not None:
         raw_df = pd.read_excel(uploaded_file, skiprows=7, header=None)
         df = process_mod_data(raw_df)
@@ -119,7 +130,6 @@ with col2:
         st.info("Using cached default MOD stack. Upload Excel for latest month.")
     
     if not df.empty:
-        # Find Parli's cumulative threshold safely
         parli_67_df = df[df['Generating_Station'].str.contains('Parali Unit - 06', case=False, na=False)]
         parli_8_df = df[df['Generating_Station'].str.contains('Parali Unit -08', case=False, na=False)]
         
@@ -128,7 +138,6 @@ with col2:
         
         st.subheader("RSD Risk Assessment")
         
-        # Risk Logic
         if simulated_demand <= parli_67_threshold:
             st.error(f"🚨 **HIGH RISK**: Simulated demand ({simulated_demand} MW) is below the MOD threshold for Parali 6 & 7 ({parli_67_threshold} MW). High probability of load curtailment or reserve shutdown.")
         elif simulated_demand <= parli_8_threshold:
@@ -138,7 +147,6 @@ with col2:
 
 # --- 6. VISUALIZE THE STEP CURVE ---
 if not df.empty:
-    # FIXED: Changed 'shape' to 'line_shape'
     fig = px.line(
         df, 
         x='Cumulative_MW', 
@@ -148,10 +156,8 @@ if not df.empty:
         labels={'Cumulative_MW': 'Cumulative Grid Demand (MW)', 'Total_VC': 'Total Variable Charge (₹/kWh)'}
     )
     
-    # Add a vertical line for the current simulated/state demand
     fig.add_vline(x=simulated_demand, line_dash="dash", line_color="#ff4b4b", annotation_text="Current Grid Demand")
     
-    # Add overlay points for hover data
     fig.add_scatter(
         x=df['Cumulative_MW'], 
         y=df['Total_VC'], 
