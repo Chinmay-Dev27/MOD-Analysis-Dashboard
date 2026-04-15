@@ -8,12 +8,20 @@ import os
 import requests
 from bs4 import BeautifulSoup
 
-# --- 1. PAGE SETUP ---
+# --- 1. PAGE SETUP & GLOBALS ---
 st.set_page_config(page_title="MOD Strategic Intelligence", layout="wide", initial_sidebar_state="expanded")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
+
+# Define the zones globally so they are never lost during CSV saves
+ZONE_LABELS = [
+    'Level 1: 0-5k MW (Base Load)', 'Level 2: 5k-10k MW (Safe)', 
+    'Level 3: 10k-15k MW (Moderate Merit)', 'Level 4: 15k-20k MW (High Merit)', 
+    'Level 5: 20k-25k MW (RSD Risk)', 'Level 6: 25k-30k MW (High Curtailment)', 
+    'Level 7: >30k MW (Peaking/Emergency)'
+]
 
 # --- 2. AUTOMATED SCRAPING (WORKS LOCALLY, BLOCKED ON CLOUD) ---
 @st.cache_data(ttl=300)
@@ -85,13 +93,7 @@ def process_dataframe(df):
     df['MW_Ahead_In_Queue'] = df['Cumulative_MW'] - df['Capacity_MW']
     
     bins = [0, 5000, 10000, 15000, 20000, 25000, 30000, float('inf')]
-    labels = [
-        'Level 1: 0-5k MW (Base Load)', 'Level 2: 5k-10k MW (Safe)', 
-        'Level 3: 10k-15k MW (Moderate Merit)', 'Level 4: 15k-20k MW (High Merit)', 
-        'Level 5: 20k-25k MW (RSD Risk)', 'Level 6: 25k-30k MW (High Curtailment)', 
-        'Level 7: >30k MW (Peaking/Emergency)'
-    ]
-    df['Demand_Zone'] = pd.cut(df['Cumulative_MW'], bins=bins, labels=labels)
+    df['Demand_Zone'] = pd.cut(df['Cumulative_MW'], bins=bins, labels=ZONE_LABELS)
     return df
 
 # --- 4. SIDEBAR UPLOAD & DATA PERSISTENCE ---
@@ -120,6 +122,8 @@ if uploaded_file is not None:
         st.sidebar.success(f"✅ Data processed and saved! You can now safely refresh the page.")
 elif os.path.exists(DATA_FILE):
     df = pd.read_csv(DATA_FILE)
+    # Fix the missing category type after loading from CSV
+    df['Demand_Zone'] = pd.Categorical(df['Demand_Zone'], categories=ZONE_LABELS, ordered=True)
     st.sidebar.success("📂 Loaded previously saved MOD data.")
 
 if not df.empty:
@@ -198,7 +202,8 @@ else:
         fig_zones.update_layout(template="plotly_dark", showlegend=False, xaxis_title="", yaxis_title="Total MW in Zone")
         st.plotly_chart(fig_zones, use_container_width=True)
 
-        for zone in df['Demand_Zone'].cat.categories:
+        # FIXED: Iterating over the static ZONE_LABELS list to prevent CSV parsing errors
+        for zone in ZONE_LABELS:
             zone_df = df[df['Demand_Zone'] == zone]
             if not zone_df.empty:
                 with st.expander(f"📂 {zone} (Total: {zone_df['Capacity_MW'].sum():,.0f} MW)"):
