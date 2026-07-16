@@ -86,7 +86,7 @@ MOD_REFERENCE_DATA = {
     "KAWAS (LQ)": {"capacity": 0.0, "rate": 24.8621}
 }
 
-# --- 3. LIVE GRID SLDC demand SCRAPER ---
+# --- 3. LIVE GRID SLDC DEMAND SCRAPER ---
 @st.cache_data(ttl=300)
 def get_live_demand():
     try:
@@ -149,9 +149,10 @@ def parse_and_heal_data(raw_rows):
         if not station_name or len(station_name) <= 2 or any(x in station_name.upper() for x in ['TOTAL', 'GENERATING STATION', 'OWNER TYPE', 'DISCOM', 'NOTE']):
             continue
             
-        # CRITICAL RECTIFICATION: Strengthened filter rules to catch all variants of private distribution lines
-        if any(p_tag in station_name.upper() for p_tag in ['AEML', 'TPOL', 'BEST', 'TATA', 'DHARIWAL', 'ADTPS', 'IDEAL ENERGY TO', 'TPC']):
-            continue
+        # FIXED: Protect public sector NTPC plants from being dropped by the private TPC filter tag
+        if "NTPC" not in station_name.upper():
+            if any(p_tag in station_name.upper() for p_tag in ['AEML', 'TPOL', 'BEST', 'TATA', 'DHARIWAL', 'ADTPS', 'IDEAL ENERGY TO', 'TPC']):
+                continue
             
         rate_match = re.search(r'\b\d+\.\d{2,4}\b', str(row[vc_col]))
         if not rate_match: continue
@@ -183,7 +184,7 @@ def parse_and_heal_data(raw_rows):
         })
         
     df = pd.DataFrame(processed_data).drop_duplicates(subset=['Generating_Station', 'Total_VC'])
-    df = df[df['Generating_Station'] != '2'].copy() # Clear residual noise characters
+    df = df[df['Generating_Station'] != '2'].copy()
     df = df.sort_values(by='Total_VC').reset_index(drop=True)
     df['MOD_Rank'] = df.index + 1
     df['Cumulative_MW'] = df['Capacity_MW'].cumsum()
