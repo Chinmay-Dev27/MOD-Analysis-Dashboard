@@ -30,7 +30,7 @@ ZONE_LABELS = [
     'Level 7: >30k MW (Peaking/Emergency)'
 ]
 
-# --- 2. REGULATORY REFERENCE LEDGER (52 TRANSACTING MSEDCL ASSETS) ---
+# --- 2. MASTER REFERENCE LEDGER (52 TRANSACTING MSEDCL ASSETS) ---
 MOD_REFERENCE_DATA = {
     "SSTPS-I Sipat": {"capacity": 510.0, "rate": 1.4327},
     "SSTPS-II Sipat": {"capacity": 258.0, "rate": 1.4467},
@@ -86,7 +86,7 @@ MOD_REFERENCE_DATA = {
     "KAWAS (LQ)": {"capacity": 0.0, "rate": 24.8621}
 }
 
-# --- 3. LIVE GRID SCRAPER ---
+# --- 3. LIVE GRID SLDC demand SCRAPER ---
 @st.cache_data(ttl=300)
 def get_live_demand():
     try:
@@ -100,7 +100,7 @@ def get_live_demand():
     except Exception:
         return None
 
-# --- 4. ADVANCED DATA INGESTION MATRIX EXPLODER ---
+# --- 4. DATA INGESTION MATRIX EXPLODER ---
 def explode_raw_matrix(rows_list):
     normalized_rows = []
     for row in rows_list:
@@ -149,8 +149,8 @@ def parse_and_heal_data(raw_rows):
         if not station_name or len(station_name) <= 2 or any(x in station_name.upper() for x in ['TOTAL', 'GENERATING STATION', 'OWNER TYPE', 'DISCOM', 'NOTE']):
             continue
             
-        # Clear out private grid distribution data arrays completely
-        if any(p_tag in station_name.upper() for p_tag in ['AEML', 'TPOL', 'BEST', 'TATA-D', 'DHARIWAL', 'ADTPS', 'IDEAL ENERGY TO']):
+        # CRITICAL RECTIFICATION: Strengthened filter rules to catch all variants of private distribution lines
+        if any(p_tag in station_name.upper() for p_tag in ['AEML', 'TPOL', 'BEST', 'TATA', 'DHARIWAL', 'ADTPS', 'IDEAL ENERGY TO', 'TPC']):
             continue
             
         rate_match = re.search(r'\b\d+\.\d{2,4}\b', str(row[vc_col]))
@@ -183,6 +183,7 @@ def parse_and_heal_data(raw_rows):
         })
         
     df = pd.DataFrame(processed_data).drop_duplicates(subset=['Generating_Station', 'Total_VC'])
+    df = df[df['Generating_Station'] != '2'].copy() # Clear residual noise characters
     df = df.sort_values(by='Total_VC').reset_index(drop=True)
     df['MOD_Rank'] = df.index + 1
     df['Cumulative_MW'] = df['Capacity_MW'].cumsum()
@@ -331,7 +332,6 @@ if not df.empty:
 
     st.markdown("---")
     
-    # NEW THREE-TAB CENTRAL TRANSPARENCY ARCHITECTURE
     tab1, tab2, tab3 = st.tabs(["🎯 Plant Deep Dive & Report Center", "📋 Auditable Extracted Data Ledger", "📊 Macro System Loading Zones"])
 
     with tab1:
@@ -363,7 +363,7 @@ if not df.empty:
         else:
             st.success(f"✅ **SAFE DESPATCH OPERATION**: System parameters comfortably clear requirements. Unit runs under base scheduling orders.")
 
-        # High-Fidelity Step Curve
+        # Interactive High-Fidelity Step Curve
         colors = ['#ff4b4b' if name == selected_plant else 'rgba(100, 110, 130, 0.3)' for name in df['Generating_Station']]
         fig = go.Figure()
         fig.add_trace(go.Bar(
@@ -383,7 +383,6 @@ if not df.empty:
 
     with tab2:
         st.subheader("Absolute Extracted Data Audit Trail")
-        st.info("Below is the exact list of units processed and captured by the execution engine. Verify the entries against the official transmission summary sheets.")
         st.dataframe(
             df[['MOD_Rank', 'Generating_Station', 'Capacity_MW', 'Total_VC', 'Cumulative_MW', 'Demand_Zone']], 
             use_container_width=True, 
