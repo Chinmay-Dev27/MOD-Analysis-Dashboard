@@ -22,7 +22,7 @@ ZONE_LABELS = [
     'Level 7: >30k MW (Peaking/Emergency)'
 ]
 
-# --- 2. AUTOMATED LIVE DEMAND SCRAPING ---
+# --- 2. AUTOMATED LIVE GRID SCRAPING ---
 @st.cache_data(ttl=300)
 def get_live_demand():
     try:
@@ -37,95 +37,91 @@ def get_live_demand():
     except Exception:
         return None
 
-# --- 3. ROBUST DATA PARSING LAYER ---
+# --- 3. MATRIX EXPLOSION CORRECTION ENGINES ---
+def explode_raw_matrix(rows_list):
+    """
+    Takes a structural list of grid lists (from cell arrays) and explodes columns 
+    containing newline line breaks to create perfectly normalized individual table rows.
+    """
+    normalized_rows = []
+    for row in rows_list:
+        if not row:
+            continue
+        # Split individual cell blocks by newline characters
+        cells_split = [str(cell).split('\n') if cell is not None else [""] for cell in row]
+        max_splits = max(len(c) for c in cells_split)
+        
+        # Synchronize cell array sizes by padding text columns
+        for c in cells_split:
+            while len(c) < max_splits:
+                c.append(c[-1] if len(c) == 1 else "")
+                
+        for i in range(max_splits):
+            sub_row = [c[i].strip() for c in cells_split]
+            normalized_rows.append(sub_row)
+            
+    return pd.DataFrame(normalized_rows)
+
 def parse_pdf_text(file_obj):
-    text = ""
+    extracted_rows = []
     with pdfplumber.open(file_obj) as pdf:
         for page in pdf.pages:
-            extracted = page.extract_text()
-            if extracted: 
-                text += extracted + "\n"
-            
-    data = []
-    pending_stations = []
+            tables = page.extract_tables()
+            if tables:
+                for table in tables:
+                    for row in table:
+                        if not row or any(c and "DISCOM WISE" in str(c).upper() for c in row):
+                            continue
+                        extracted_rows.append(row)
+                        
+    if not extracted_rows:
+        return pd.DataFrame(columns=['Generating_Station', 'Capacity_MW', 'Total_VC'])
+        
+    df_raw = explode_raw_matrix(extracted_rows)
     
-    for line in text.split('\n'):
-        line = line.strip()
-        if not line or "DISCOM" in line or "MOD STACK" in line or "Effective from" in line: 
-            continue
-        
-        # Extract all decimal rates matching variable charge patterns (e.g., 24.8621, 4.1330)
-        rates = [float(r) for r in re.findall(r'\b\d+\.\d{2,4}\b', line)]
-        
-        # Clean out numbers, decimals, and structural symbols to isolate station name components
-        text_cleanup = re.sub(r'[\d\.\:\-\/,\"\']', '', line).strip()
-        words = [w for w in text_cleanup.split() if len(w) > 1 and w.upper() not in ['G', 'CE', 'CS', 'COAL', 'GAS', 'TYPE', 'FUEL']]
-        station_name = " ".join(words).strip()
-        
-        # Scenario A: Multiple rates are combined horizontally on a single line with station text
-        if len(rates) > 1:
-            # Look for distinctive layout split markers or split text into equal chunks matching the rates
-            raw_segs = re.split(r'\b(?:CE|CS|G|COAL|GAS|MSPGCL)\b', line, flags=re.IGNORECASE)
-            clean_segs = []
-            for seg in raw_segs:
-                s_clean = re.sub(r'[\d\.\:\-\/,\"\']', '', seg).strip()
-                if len(s_clean) > 3 and s_clean.upper() not in ['OWNER TYPE', 'GENERATING STATION', 'TYPE OF FUEL']:
-                    clean_segs.append(s_clean)
+    # Dynamically locate structural indices
+    station_col, cap_col, vc_col = 0, 1, df_raw.shape[1] - 1
+    for col in df_raw.columns:
+        col_str = " ".join(df_raw[col].dropna().astype(str)).lower()
+        if "parali" in col_str or "chandrapur" in col_str or "nasik" in col_str:
+            station_col = col
+            break
             
-            # Pair them up sequentially if the token splits match the number of numeric rates found
-            if len(clean_segs) == len(rates):
-                for s, r in zip(clean_segs, rates):
-                    data.append({'Generating_Station': s, 'Capacity_MW': "0", 'Total_VC': r})
-            else:
-                # Fallback: Treat as a single combined label or assign sequentially to any pending slots
-                if len(station_name) > 3:
-                    data.append({'Generating_Station': station_name, 'Capacity_MW': "0", 'Total_VC': rates[-1]})
-            continue
-
-        # Scenario B: Single line containing both the station description and a variable charge component
-        if len(station_name) > 3 and len(rates) == 1:
-            pending_stations = [] # Flush tracking queue to avoid data alignment shifts
-            capacity_match = re.search(r'\b\d{2,4}\b', line)
-            capacity = capacity_match.group() if capacity_match else "0"
-            data.append({
-                'Generating_Station': station_name, 
-                'Capacity_MW': capacity, 
-                'Total_VC': rates[0]
-            })
-            
-        # Scenario C: Text-only row indicating a vertically separated column configuration
-        elif len(station_name) > 3 and not rates:
-            if station_name.upper() not in ['MSPGCL', 'MTOA', 'LTOA', 'STOA', 'OWNER TYPE', 'GENERATING STATION']:
-                pending_stations.append(station_name)
-                
-        # Scenario D: Numeric rate row that maps directly to a name cached in the tracking queue above it
-        elif len(rates) == 1 and not station_name and pending_stations:
-            current_station = pending_stations.pop(0)
-            data.append({
-                'Generating_Station': current_station, 
-                'Capacity_MW': "0", 
-                'Total_VC': rates[0]
-            })
-            
-    return pd.DataFrame(data)
+    df_raw = df_raw.rename(columns={station_col: 'Generating_Station', df_raw.columns[station_col+2]: 'Capacity_MW', vc_col: 'Total_VC'})
+    return df_raw[['Generating_Station', 'Capacity_MW', 'Total_VC']]
 
 def process_dataframe(df):
-    def extract_share(mw_string):
-        if pd.isna(mw_string): return 0.0
-        mw_str = str(mw_string).strip()
-        if mw_str.lower() in ['-', 'xxx', '', 'nan']: return 0.0
-        target_str = mw_str.split('/')[1] if '/' in mw_str else mw_str
-        target_str = target_str.replace(',', '')
-        match = re.search(r'[\d\.]+', target_str)
+    df.columns = ['Generating_Station', 'Capacity_MW', 'Total_VC']
+    df['Generating_Station'] = df['Generating_Station'].astype(str).str.strip()
+    
+    # Drop structural metadata rows
+    df = df[~df['Generating_Station'].str.upper().str.contains('TOTAL|GENERATING|STATION|OWNER|DISCOM|NOTE|SARAH|READING', na=False)]
+    df = df[df['Generating_Station'] != ""].copy()
+    
+    def extract_share(mw_val):
+        if pd.isna(mw_val): return 0.0
+        s = str(mw_val).strip().replace(',', '')
+        if s.lower() in ['-', 'xxx', '', 'nan'] or any(alpha in s.lower() for alpha in ['coal', 'gas', 'liquid']): return 0.0
+        s = s.split('/')[1] if '/' in s else s
+        match = re.search(r'[\d\.]+', s)
         return float(match.group()) if match else 0.0
 
+    def extract_vc(vc_val):
+        if pd.isna(vc_val): return 0.0
+        s = str(vc_val).strip().replace(',', '')
+        match = re.search(r'[\d\.]+', s)
+        if match:
+            val = float(match.group())
+            return val if val < 30.0 else 0.0 # Guard filter against capacity leakage
+        return 0.0
+
     df['Capacity_MW'] = df['Capacity_MW'].apply(extract_share)
+    df['Total_VC'] = df['Total_VC'].apply(extract_vc)
     
-    # CRITICAL FIX: Filter by the presence of a valid cost rate instead of capacity size
-    # This prevents the removal of units containing zero or blank capacity placeholders
+    # Filter strictly on Variable Charge parameters to preserve zero-capacity configurations
     df = df[df['Total_VC'] > 0].copy()
     
-    # Sort strictly by Variable Charge component to calculate merit ranks accurately
+    # Standardize Merit Curve Ranking Order
     df = df.sort_values(by='Total_VC').reset_index(drop=True)
     df['MOD_Rank'] = df.index + 1
     df['Cumulative_MW'] = df['Capacity_MW'].cumsum()
@@ -135,12 +131,12 @@ def process_dataframe(df):
     df['Demand_Zone'] = pd.cut(df['Cumulative_MW'], bins=bins, labels=ZONE_LABELS)
     return df
 
-# --- 4. SIDEBAR MANAGEMENT & PERSISTENCE ---
+# --- 4. SIDEBAR INPUT & DATA CACHING ---
 DATA_FILE = "saved_mod_stack.csv"
 
 with st.sidebar:
     st.header("⚙️ Data Source Management")
-    st.info("Upload the raw layout file. The parsed output will be cached locally.")
+    st.info("Upload the raw SLDC MOD Stack layout file.")
     uploaded_file = st.file_uploader("Upload MOD Stack (PDF or Excel)", type=["pdf", "xlsx"])
     
 df = pd.DataFrame()
@@ -151,12 +147,20 @@ if uploaded_file is not None:
         raw_df = parse_pdf_text(uploaded_file)
         df = process_dataframe(raw_df)
     elif file_ext.endswith('.xlsx'):
-        # Dynamic boundary indexing to adapt to changing spreadsheet header heights
-        raw_df = pd.read_excel(uploaded_file, skiprows=4, header=None)
-        if raw_df.shape[1] >= 8:
-            raw_df = raw_df.iloc[:, [1, 3, 7]]
-            raw_df.columns = ['Generating_Station', 'Capacity_MW', 'Total_VC']
-            df = process_dataframe(raw_df)
+        raw_excel = pd.read_excel(uploaded_file, header=None)
+        raw_rows = raw_excel.values.tolist()
+        df_exploded = explode_raw_matrix(raw_rows)
+        
+        # Locate matching index tracks dynamically
+        st_idx, cap_idx, vc_idx = 1, 3, 7
+        for col in df_exploded.columns:
+            col_str = " ".join(df_exploded[col].dropna().astype(str)).lower()
+            if "parali" in col_str or "bhusawal" in col_str:
+                st_idx = col
+                break
+        
+        final_excel_df = df_exploded[[st_idx, df_exploded.columns[st_idx+2], df_exploded.columns[df_exploded.shape[1]-1]]].copy()
+        df = process_dataframe(final_excel_df)
         
     if not df.empty:
         df.to_csv(DATA_FILE, index=False)
@@ -170,16 +174,16 @@ if not df.empty:
     with st.sidebar.expander("🔍 Operational Merit Order Ledger"):
         st.dataframe(df[['MOD_Rank', 'Generating_Station', 'Capacity_MW', 'Total_VC']], hide_index=True)
 
-# --- 5. EXECUTIVE ANALYTICS DASHBOARD ---
+# --- 5. EXECUTIVE ANCHOR ANALYTICS ---
 st.title("⚡ MOD Grid Strategy & Risk Dashboard")
 
 if df.empty:
-    st.warning("👈 Please upload the primary grid dispatch data sheet in the sidebar to initialize analytics.")
+    st.warning("👈 Please upload the primary grid dispatch dataset in the sidebar to initialize analytics.")
 else:
     live_demand = get_live_demand()
     
     col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
-    col_kpi1.metric("Total Online Capacity", f"{df['Capacity_MW'].sum():,.0f} MW")
+    col_kpi1.metric("Total Capacity Tracked", f"{df['Capacity_MW'].sum():,.0f} MW")
     col_kpi2.metric("Cheapest Baseload VC", f"₹{df['Total_VC'].min():.4f}/kWh")
     col_kpi3.metric("Most Expensive Peak VC", f"₹{df['Total_VC'].max():.4f}/kWh")
     col_kpi4.metric("Total Tracked Units", f"{len(df)}")
@@ -189,17 +193,17 @@ else:
     st.subheader("Grid Dispatch Simulation Engine")
     if live_demand:
         st.success(f"📡 Real-Time Grid Connection Active: **{live_demand:,.0f} MW**")
-        simulated_demand = st.slider("Adjust State Grid Demand for Operational Stress Test (MW):", min_value=1000, max_value=35000, value=live_demand, step=100)
+        simulated_demand = st.slider("Adjust State Grid Demand for Simulation (MW):", min_value=1000, max_value=35000, value=live_demand, step=100)
     else:
-        st.info("🌐 Live scrape connection unavailable. Manual scheduling profile simulation mode active.")
+        st.info("🌐 Manual scheduling profile simulation active.")
         simulated_demand = st.slider("Simulate State Grid Demand Profile (MW):", min_value=1000, max_value=35000, value=20000, step=100)
 
     st.markdown("---")
     tab1, tab2 = st.tabs(["🎯 Plant Deep Dive & Dispatch Risk", "📊 Macro Loading Zones"])
 
-    # --- TAB 1: INDIVIDUAL GENERATING STATION RISK ANALYTICS ---
+    # --- TAB 1: GENERATING STATION INDIVIDUAL ANCHOR TRACKING ---
     with tab1:
-        # Context-aware defaulting to prioritize regional generation assets cleanly
+        # Prioritize matching regional thermal utilities immediately
         search_match = df.index[df['Generating_Station'].str.contains('Parali', case=False, na=False)].tolist()
         default_idx = int(search_match[0]) if search_match else 0
         
@@ -209,18 +213,18 @@ else:
         sc1, sc2, sc3, sc4 = st.columns(4)
         sc1.metric("Merit Rank Position", f"#{plant_data['MOD_Rank']} of {len(df)}")
         sc2.metric("Variable Charge Rate", f"₹{plant_data['Total_VC']:.4f}/kWh")
-        sc3.metric("Lower-Cost Backlog Ahead", f"{plant_data['MW_Ahead_In_Queue']:,.0f} MW")
+        sc3.metric("Lower-Cost Capacity Ahead", f"{plant_data['MW_Ahead_In_Queue']:,.0f} MW")
         sc4.metric("Grid Safety Tier", str(plant_data['Demand_Zone']).split(' (')[0])
 
-        # Core Dispatch Threshold Assessment
+        # Dispatch Safety Zone Assessment
         if simulated_demand <= plant_data['MW_Ahead_In_Queue']:
-            st.error(f"🚨 **CRITICAL RISK (UNSCHEDULED / CURTAILED)**: Current system demand ({simulated_demand:,} MW) is insufficient to clear the lower-cost capacity stacked ahead of this unit ({plant_data['MW_Ahead_In_Queue']:,.0f} MW). Expected Status: Reserve Shut Down (RSD).")
+            st.error(f"🚨 **CRITICAL RISK (CURTAILED)**: Current system demand ({simulated_demand:,} MW) is lower than the cheaper capacity ahead of this unit ({plant_data['MW_Ahead_In_Queue']:,.0f} MW). Unit is outside the clearance line and will be forced into Reserve Shut Down (RSD).")
         elif simulated_demand <= plant_data['Cumulative_MW']:
-            st.warning(f"⚠️ **MARGINAL STATE (DISPATCH BOUNDARY)**: This generating asset is currently setting the system marginal price. Small fluctuations in grid parameters will trigger cyclic load changes.")
+            st.warning(f"⚠️ **MARGINAL DISPATCH BOUNDARY**: This unit is currently riding the grid margin. Small system load changes will trigger immediate schedule cycling or load variations.")
         else:
-            st.success(f"✅ **SAFE DESPATCH TIER**: System loading completely clears the clearing rank threshold. Unit runs under standard schedule requirements.")
+            st.success(f"✅ **SAFE DESPATCH TIER**: System load comfortably clears this rank threshold. Unit runs under base schedule requirements.")
 
-        # Merit Order Dispatch Curve Visualization
+        # Plotly Stack Step Graph
         colors = ['#ff4b4b' if name == selected_plant else 'rgba(100, 110, 130, 0.4)' for name in df['Generating_Station']]
         fig = go.Figure()
         fig.add_trace(go.Bar(
@@ -234,16 +238,16 @@ else:
             customdata=df['Cumulative_MW']
         ))
         
-        fig.add_vline(x=simulated_demand, line_dash="solid", line_color="#ffcc00", annotation_text="Simulated State Demand", annotation_position="top left")
-        fig.add_vline(x=plant_data['Cumulative_MW'], line_dash="dash", line_color="#ff4b4b", annotation_text="Unit Dispatch Anchor", annotation_position="bottom right")
+        fig.add_vline(x=simulated_demand, line_dash="solid", line_color="#ffcc00", annotation_text="Simulated Demand Line", annotation_position="top left")
+        fig.add_vline(x=plant_data['Cumulative_MW'], line_dash="dash", line_color="#ff4b4b", annotation_text="Unit Clear Line", annotation_position="bottom right")
 
         fig.update_layout(xaxis_title="Cumulative System Loading Block (MW)", yaxis_title="Variable Charge Rate (₹/kWh)", template="plotly_dark", bargap=0, height=480)
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- TAB 2: MACRO BLOCK & HEADROOM DYNAMICS ---
+    # --- TAB 2: MACRO OVERVIEW & HEADROOM LOADING ---
     with tab2:
         zone_summary = df.groupby('Demand_Zone', observed=True)['Capacity_MW'].sum().reset_index()
-        fig_zones = px.bar(zone_summary, x='Demand_Zone', y='Capacity_MW', color='Demand_Zone', title="Aggregated Generation Blocks per 5,000 MW Demand Interval", text_auto='.0f', color_discrete_sequence=px.colors.sequential.Viridis)
+        fig_zones = px.bar(zone_summary, x='Demand_Zone', y='Capacity_MW', color='Demand_Zone', title="Aggregated Capacity Blocks per 5,000 MW Demand Interval", text_auto='.0f', color_discrete_sequence=px.colors.sequential.Viridis)
         fig_zones.update_layout(template="plotly_dark", showlegend=False, xaxis_title="", yaxis_title="Total Block Capacity (MW)")
         st.plotly_chart(fig_zones, use_container_width=True)
 
