@@ -5,3 +5,10 @@ requests
 beautifulsoup4
 pdfplumber
 openpyxl
+pdfplumber
+matplotlib
+reportlab
+plotly
+pandas
+requests
+beautifulsoup4
