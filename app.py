@@ -10,7 +10,7 @@ import requests
 import matplotlib.pyplot as plt
 from bs4 import BeautifulSoup
 
-# Advanced PDF typography components
+# Advanced PDF typography and layout components
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, KeepTogether
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -30,8 +30,7 @@ ZONE_LABELS = [
     'Level 7: >30k MW (Peaking/Emergency)'
 ]
 
-# --- 2. SELF-HEALING REGULATORY REFERENCE LEDGER ---
-# This dictionary serves as the absolute source of truth for all 52 units, ensuring perfect capacity mapping
+# --- 2. REGULATORY REFERENCE LEDGER (52 TRANSACTING MSEDCL ASSETS) ---
 MOD_REFERENCE_DATA = {
     "SSTPS-I Sipat": {"capacity": 510.0, "rate": 1.4327},
     "SSTPS-II Sipat": {"capacity": 258.0, "rate": 1.4467},
@@ -87,7 +86,7 @@ MOD_REFERENCE_DATA = {
     "KAWAS (LQ)": {"capacity": 0.0, "rate": 24.8621}
 }
 
-# --- 3. LIVE DEMAND SCRAPER ---
+# --- 3. LIVE GRID SCRAPER ---
 @st.cache_data(ttl=300)
 def get_live_demand():
     try:
@@ -96,13 +95,12 @@ def get_live_demand():
         soup = BeautifulSoup(response.text, 'html.parser')
         text = soup.get_text()
         match = re.search(r'(\d+)\s*MW State Demand', text, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
+        if match: return int(match.group(1))
         return None
     except Exception:
         return None
 
-# --- 4. DATA PARSING & EXPLOSION ENGINE ---
+# --- 4. ADVANCED DATA INGESTION MATRIX EXPLODER ---
 def explode_raw_matrix(rows_list):
     normalized_rows = []
     for row in rows_list:
@@ -120,10 +118,6 @@ def explode_raw_matrix(rows_list):
     return normalized_rows
 
 def detect_column_indices(matrix):
-    """
-    Evaluates row vectors dynamically to isolate Generating Station, Capacity, 
-    and Variable Charge columns without getting confused by the serial number column.
-    """
     col_scores = {i: {'floats': 0, 'text': 0, 'cap_ints': 0} for i in range(len(matrix[0]))}
     for row in matrix:
         for idx, cell in enumerate(row):
@@ -145,30 +139,26 @@ def detect_column_indices(matrix):
     return st_col, cap_col, vc_col
 
 def parse_and_heal_data(raw_rows):
-    if not raw_rows:
-        return pd.DataFrame()
-    
+    if not raw_rows: return pd.DataFrame()
     exploded = explode_raw_matrix(raw_rows)
     st_col, cap_col, vc_col = detect_column_indices(exploded)
     
     processed_data = []
     for row in exploded:
         station_name = str(row[st_col]).strip()
-        if not station_name or any(x in station_name.upper() for x in ['TOTAL', 'GENERATING STATION', 'OWNER TYPE', 'DISCOM', 'NOTE']):
+        if not station_name or len(station_name) <= 2 or any(x in station_name.upper() for x in ['TOTAL', 'GENERATING STATION', 'OWNER TYPE', 'DISCOM', 'NOTE']):
             continue
             
-        # Strip structural private DISCOM noise leaks completely
-        if any(p_tag in station_name.upper() for p_tag in ['AEML', 'TPOL', 'BEST', 'TATA-D', 'DHARIWAL', 'ADTPS']):
+        # Clear out private grid distribution data arrays completely
+        if any(p_tag in station_name.upper() for p_tag in ['AEML', 'TPOL', 'BEST', 'TATA-D', 'DHARIWAL', 'ADTPS', 'IDEAL ENERGY TO']):
             continue
             
         rate_match = re.search(r'\b\d+\.\d{2,4}\b', str(row[vc_col]))
         if not rate_match: continue
         parsed_rate = float(rate_match.group())
         
-        # Self-Healing Layer: cross-verify text structure against our Reference Ledger
         matched_key = None
         for ref_key in MOD_REFERENCE_DATA:
-            # Clean string matching comparison checks
             ref_clean = re.sub(r'[\s\-\(\)\.&_]', '', ref_key.lower())
             st_clean = re.sub(r'[\s\-\(\)\.&_]', '', station_name.lower())
             if ref_clean in st_clean or st_clean in ref_clean:
@@ -193,8 +183,6 @@ def parse_and_heal_data(raw_rows):
         })
         
     df = pd.DataFrame(processed_data).drop_duplicates(subset=['Generating_Station', 'Total_VC'])
-    
-    # Sort strictly by Variable Charge
     df = df.sort_values(by='Total_VC').reset_index(drop=True)
     df['MOD_Rank'] = df.index + 1
     df['Cumulative_MW'] = df['Capacity_MW'].cumsum()
@@ -202,7 +190,7 @@ def parse_and_heal_data(raw_rows):
     df['Demand_Zone'] = pd.cut(df['Cumulative_MW'], bins=[0, 5000, 10000, 15000, 20000, 25000, 30000, float('inf')], labels=ZONE_LABELS)
     return df
 
-# --- 5. EXECUTIVE DASHBOARD PDF REPORT ENGINE ---
+# --- 5. PREMIUM DASHBOARD PDF ENGINE ---
 def generate_pdf_report(plant_name, df, simulated_demand):
     plant_data = df[df['Generating_Station'] == plant_name].iloc[0]
     buffer = io.BytesIO()
@@ -211,43 +199,30 @@ def generate_pdf_report(plant_name, df, simulated_demand):
     story = []
     styles = getSampleStyleSheet()
     
-    title_style = ParagraphStyle('HTitle', fontName='Helvetica-Bold', fontSize=18, textColor=colors.white, alignment=1)
-    subtitle_style = ParagraphStyle('HSub', fontName='Helvetica', fontSize=9, textColor=colors.HexColor('#D9E1F2'), alignment=1)
-    section_title = ParagraphStyle('STitle', fontName='Helvetica-Bold', fontSize=12, textColor=colors.HexColor('#1F4E78'), spaceBefore=8, spaceAfter=4)
-    body_style = ParagraphStyle('BText', fontName='Helvetica', fontSize=10, leading=14, textColor=colors.HexColor('#262626'))
+    title_style = ParagraphStyle('TText', fontName='Helvetica-Bold', fontSize=16, textColor=colors.white, alignment=1)
+    subtitle_style = ParagraphStyle('SText', fontName='Helvetica', fontSize=9, textColor=colors.HexColor('#D9E1F2'), alignment=1)
+    section_title = ParagraphStyle('SecT', fontName='Helvetica-Bold', fontSize=12, textColor=colors.HexColor('#1F4E78'), spaceBefore=10, spaceAfter=4)
+    body_style = ParagraphStyle('BStyle', fontName='Helvetica', fontSize=10, leading=14, textColor=colors.HexColor('#262626'))
     kpi_title = ParagraphStyle('KTitle', fontName='Helvetica-Bold', fontSize=8, textColor=colors.HexColor('#595959'), alignment=1)
     kpi_value = ParagraphStyle('KVal', fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#1F4E78'), alignment=1)
     
-    # 1. Dashboard Banner Header
     header_data = [[Paragraph("MERIT ORDER DISPATCH (MOD) STRATEGIC BRIEF", title_style)],
                    [Paragraph("State Grid Code Regulation Framework | Operational Integration Ledger", subtitle_style)]]
     header_table = Table(header_data, colWidths=[540])
-    header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#1F4E78')),
-        ('TOPPADDING', (0,0), (-1,-1), 10),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 10),
-    ]))
+    header_table.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#1F4E78')), ('TOPPADDING', (0,0), (-1,-1), 10), ('BOTTOMPADDING', (0,0), (-1,-1), 10)]))
     story.append(header_table)
     story.append(Spacer(1, 12))
     
-    # 2. Executive KPI Cards Row
     kpi_cells = [
         [Paragraph("GRID MERIT RANK", kpi_title), Paragraph("VARIABLE COST RATE", kpi_title), Paragraph("NET METRIC CAPACITY", kpi_title)],
         [Paragraph(f"#{int(plant_data['MOD_Rank'])} of {len(df)}", kpi_value), Paragraph(f"₹{plant_data['Total_VC']:.4f}/kWh", kpi_value), Paragraph(f"{plant_data['Capacity_MW']:.1f} MW", kpi_value)]
     ]
     kpi_table = Table(kpi_cells, colWidths=[180, 180, 180])
-    kpi_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F2F5F9')),
-        ('BOX', (0,0), (-1,-1), 1, colors.HexColor('#D9E1F2')),
-        ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor('#D9E1F2')),
-        ('TOPPADDING', (0,0), (-1,-1), 6),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
-    ]))
+    kpi_table.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F2F5F9')), ('BOX', (0,0), (-1,-1), 1, colors.HexColor('#D9E1F2')), ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor('#D9E1F2')), ('TOPPADDING', (0,0), (-1,-1), 6), ('BOTTOMPADDING', (0,0), (-1,-1), 6)]))
     story.append(kpi_table)
     story.append(Spacer(1, 12))
     
-    # 3. Operational Matrix Parameters Block
-    status, status_color, status_desc = "SAFE DESPATCH PROFILE", "#1B5E20", "The asset comfortably clears the lower-cost backlog queue and runs continuously under basic grid parameters."
+    status, status_color, status_desc = "SAFE DESPATCH PROFILE", "#1B5E20", "The asset safely clears the lower-cost backlog queue and runs continuously under standard grid parameters."
     if simulated_demand <= plant_data['MW_Ahead_In_Queue']:
         status, status_color, status_desc = "CRITICAL RSD / CURTAILED BOUNDARY", "#B71C1C", "System loading fails to clear the economic baseline required for this asset. High risk of forced Reserve Shut Down (RSD)."
     elif simulated_demand <= plant_data['Cumulative_MW']:
@@ -262,31 +237,13 @@ def generate_pdf_report(plant_name, df, simulated_demand):
         ["Grid Loading Dispatch Category", str(plant_data['Demand_Zone']).split(':')[-1].strip()]
     ]
     matrix_table = Table(matrix_data, colWidths=[220, 320])
-    matrix_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#4A5568')),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
-        ('TOPPADDING', (0,0), (-1,-1), 5),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 5),
-        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F7FAFC')])
-    ]))
+    matrix_table.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.HexColor('#4A5568')), ('TEXTCOLOR', (0,0), (-1,0), colors.white), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')), ('TOPPADDING', (0,0), (-1,-1), 5), ('BOTTOMPADDING', (0,0), (-1,-1), 5), ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F7FAFC')])]))
     
-    story.append(KeepTogether([
-        Paragraph("1. System Dispatch Assessment Matrix", section_title),
-        analysis_paragraph,
-        Spacer(1, 6),
-        matrix_table
-    ]))
+    story.append(KeepTogether([Paragraph("1. System Dispatch Assessment Matrix", section_title), analysis_paragraph, Spacer(1, 6), matrix_table]))
     story.append(Spacer(1, 12))
     
-    # 4. Accurate Merit Order Step Plot Block
-    x_steps = [0]
-    y_steps = []
-    for _, r in df.iterrows():
-        x_steps.append(r['Cumulative_MW'])
-        y_steps.append(r['Total_VC'])
-    y_steps.append(y_steps[-1])
+    x_steps = [0] + list(df['Cumulative_MW'])
+    y_steps = list(df['Total_VC']) + [list(df['Total_VC'])[-1]]
     
     fig, ax = plt.subplots(figsize=(6.5, 2.5), facecolor='#F8FAFC')
     ax.set_facecolor('#FFFFFF')
@@ -305,17 +262,13 @@ def generate_pdf_report(plant_name, df, simulated_demand):
     chart_buf.seek(0)
     plt.close()
     
-    story.append(KeepTogether([
-        Paragraph("2. Graphical Supply Stack Curve Analysis", section_title),
-        Spacer(1, 4),
-        Image(chart_buf, width=540, height=207)
-    ]))
+    story.append(KeepTogether([Paragraph("2. Graphical Supply Stack Curve Analysis", section_title), Spacer(1, 4), Image(chart_buf, width=540, height=207)]))
     
     doc.build(story)
     buffer.seek(0)
     return buffer.getvalue()
 
-# --- 6. STREAMLIT DATA INGESTION ---
+# --- 6. DATA HANDLING LAYERING ---
 DATA_FILE = "saved_mod_stack.csv"
 df = pd.DataFrame()
 
@@ -343,9 +296,7 @@ if uploaded_file is not None:
 elif os.path.exists(DATA_FILE):
     df = pd.read_csv(DATA_FILE)
     df['Demand_Zone'] = pd.Categorical(df['Demand_Zone'], categories=ZONE_LABELS, ordered=True)
-    st.sidebar.success(f"📂 Operational Stack Restored: {len(df)} units active.")
 else:
-    # Gold standard auto-population layer if no files are uploaded initially
     processed_fallback = []
     for k, v in MOD_REFERENCE_DATA.items():
         processed_fallback.append({'Generating_Station': k, 'Capacity_MW': v['capacity'], 'Total_VC': v['rate']})
@@ -355,7 +306,7 @@ else:
     df['MW_Ahead_In_Queue'] = df['Cumulative_MW'] - df['Capacity_MW']
     df['Demand_Zone'] = pd.cut(df['Cumulative_MW'], bins=[0, 5000, 10000, 15000, 20000, 25000, 30000, float('inf')], labels=ZONE_LABELS)
     df.to_csv(DATA_FILE, index=False)
-    st.sidebar.info(f"📂 Initialized reference ledger ({len(df)} units online).")
+    st.sidebar.info(f"📂 Initialized master reference ledger ({len(df)} units online).")
 
 # --- 7. DASHBOARD WORKSPACE ---
 st.title("⚡ MOD Grid Strategy & Risk Dashboard")
@@ -379,7 +330,9 @@ if not df.empty:
         simulated_demand = st.slider("Simulate Total State Grid Demand (MW):", min_value=1000, max_value=35000, value=20000, step=100)
 
     st.markdown("---")
-    tab1, tab2 = st.tabs(["🎯 Plant Deep Dive & Report Center", "📊 Macro System Loading Zones"])
+    
+    # NEW THREE-TAB CENTRAL TRANSPARENCY ARCHITECTURE
+    tab1, tab2, tab3 = st.tabs(["🎯 Plant Deep Dive & Report Center", "📋 Auditable Extracted Data Ledger", "📊 Macro System Loading Zones"])
 
     with tab1:
         search_match = df.index[df['Generating_Station'].str.contains('Parali', case=False, na=False)].tolist()
@@ -410,7 +363,7 @@ if not df.empty:
         else:
             st.success(f"✅ **SAFE DESPATCH OPERATION**: System parameters comfortably clear requirements. Unit runs under base scheduling orders.")
 
-        # Interactive High-Fidelity Step Curve
+        # High-Fidelity Step Curve
         colors = ['#ff4b4b' if name == selected_plant else 'rgba(100, 110, 130, 0.3)' for name in df['Generating_Station']]
         fig = go.Figure()
         fig.add_trace(go.Bar(
@@ -429,6 +382,15 @@ if not df.empty:
         st.plotly_chart(fig, use_container_width=True)
 
     with tab2:
+        st.subheader("Absolute Extracted Data Audit Trail")
+        st.info("Below is the exact list of units processed and captured by the execution engine. Verify the entries against the official transmission summary sheets.")
+        st.dataframe(
+            df[['MOD_Rank', 'Generating_Station', 'Capacity_MW', 'Total_VC', 'Cumulative_MW', 'Demand_Zone']], 
+            use_container_width=True, 
+            hide_index=True
+        )
+
+    with tab3:
         zone_summary = df.groupby('Demand_Zone', observed=True)['Capacity_MW'].sum().reset_index()
         fig_zones = px.bar(zone_summary, x='Demand_Zone', y='Capacity_MW', color='Demand_Zone', title="Aggregated Capacity Blocks per 5,000 MW Demand Interval", text_auto='.0f')
         fig_zones.update_layout(template="plotly_dark", showlegend=False, xaxis_title="", yaxis_title="Total Block Capacity (MW)")
